@@ -6,6 +6,8 @@ follow complete [Roadmap](https://exposnitc.github.io/Roadmap.html)
 
 ## Step 1- 4
 
+### Control Flow of BOOT ROM execution
+
 ```
 Power ON
    ↓
