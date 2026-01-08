@@ -23,4 +23,4 @@ OS Startup Code runs
    ↓
 Kernel initializes system
 
-~~~
+```
