@@ -1,0 +1,36 @@
+decl
+  int temp;
+enddecl
+
+int main(){
+decl
+  int pid1, pid2, temp;
+enddecl
+begin
+
+  pid1 = exposcall("Fork");
+
+  if(pid1 == 0) then
+    temp = exposcall("Write", -2, "Child 1 starting");
+    temp = exposcall("Exec", "odd.xsm");
+  endif;
+
+  
+  pid2 = exposcall("Fork");
+
+  if(pid2 == 0) then
+    temp = exposcall("Write", -2, "Child 2 starting");
+    temp = exposcall("Exec", "even.xsm");
+  endif;
+
+  
+  temp = exposcall("Write", -2, "Parent calling wait");
+
+  temp = exposcall("Wait");
+
+  
+  temp = exposcall("Write", -2, "Parent resumed after child exit");
+
+  return 0;
+end
+}

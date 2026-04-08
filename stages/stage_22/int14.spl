@@ -1,0 +1,112 @@
+//INT-14
+
+alias userSP R1;
+userSP = SP;                                    // Save user stack pointer
+alias currPID R2;
+currPID = [SYSTEM_STATUS_TABLE + 1];            // Get current running process PID
+alias procTab R3;
+procTab = PROCESS_TABLE + 16*currPID;           // Get current process's process table entry
+alias syscall R4;
+syscall = [[PTBR + 2*(userSP-5)/512]*512 + (userSP-5)%512];  // Read syscall number from user stack
+[procTab + 9] = syscall;                        // Store syscall number in MODE FLAG
+[procTab + 13] = SP;                            // Save user SP in process table (USER SP field)
+SP = [procTab + 11]*512 - 1;                    // Switch to kernel stack (UPTR field holds user area page)
+
+// SEMLOCK (syscall 19) 
+// Locks a semaphore. If already locked by another process, the calling process
+// blocks in WAIT_SEMAPHORE state until the semaphore is released.
+// Returns: 0 on success, -1 on invalid semaphore descriptor.
+if(syscall == 19) then
+    alias semid R5;
+    alias resTab R6;
+    resTab = ([procTab+11])*512 + RESOURCE_TABLE_OFFSET;  // Per-process resource table base address
+    breakpoint;
+
+    semid = [[PTBR + 2*(userSP-4)/512]*512 + (userSP-4)%512];  // Read semaphore descriptor from user stack (arg1)
+
+    // Validate semid: must be in range 0–7 and the resource table entry must be a semaphore (SEMAPHORE type)
+    if(semid < 0 || semid > 7 || [resTab + 2*semid] != SEMAPHORE) then
+        [[PTBR + 2*(userSP-1)/512]*512 + (userSP-1)%512] = -1;  // Return -1 to user
+        SP = userSP;                            // Restore user SP
+        [procTab + 9] = 0;                      // Clear MODE FLAG
+        ireturn;
+    endif;
+
+    alias semind R7;
+    semind = [resTab + 2*semid + 1];            // Get semaphore table index from resource table entry
+
+    // If semaphore is locked by another process (locking PID != -1 and != currPID),
+    // block this process and context switch until the semaphore becomes available
+    while([SEMAPHORE_TABLE + semind*4] != -1 && [SEMAPHORE_TABLE + semind*4] != currPID) do
+        [procTab + 4] = WAIT_SEMAPHORE;         // Set process state to WAIT_SEMAPHORE
+        [procTab + 5] = semind;                 // Store semaphore table index in process table (WAIT_INFO)
+        multipush(R1, R2, R3, R4, R5, R6, R7);
+        breakpoint;
+        call MOD_5;                             // Call Scheduler (MOD_5) to context switch
+        multipop(R1, R2, R3, R4, R5, R6, R7);
+        // After waking up, re-check the lock condition in the while loop
+    endwhile;
+
+    [SEMAPHORE_TABLE + semind*4] = currPID;     // Acquire the lock — store currPID as the locking process
+    [procTab + 9] = 0;                          // Clear MODE FLAG
+    SP = userSP;                                // Restore user SP
+    [[PTBR + 2*(userSP-1)/512]*512 + (userSP-1)%512] = 0;  // Return 0 (success) to user
+    ireturn;
+endif;
+
+// ─── SEMUNLOCK (syscall 20) 
+// Unlocks a semaphore held by the current process.
+// Wakes up all processes waiting on this semaphore.
+// Returns: 0 on success, -1 on invalid semaphore descriptor, -2 if locked by another process.
+if(syscall == 20) then
+    alias semid R5;
+    alias resTab R6;
+    resTab = ([procTab+11]+1)*512 - 16;         // Per-process resource table base address (last 16 words of user area page)
+
+    semid = [[PTBR + 2*(userSP-4)/512]*512 + (userSP-4)%512];  // Read semaphore descriptor from user stack (arg1)
+
+    // Validate semid: must be in range 0–7 and the resource table entry must be a semaphore (type == 1)
+    if(semid < 0 || semid > 7 || [resTab + 2*semid] != 1) then
+        [[PTBR + 2*(userSP-1)/512]*512 + (userSP-1)%512] = -1;  // Return -1 to user
+        SP = userSP;                            // Restore user SP
+        [procTab + 9] = 0;                      // Clear MODE FLAG
+        ireturn;
+    endif;
+
+    alias semind R7;
+    semind = [resTab + 2*semid + 1];            // Get semaphore table index from resource table entry
+
+    // Only proceed if the semaphore is currently locked (locking PID != -1)
+    if([SEMAPHORE_TABLE + 4*semind] != -1) then
+
+        // If the semaphore is locked by a different process, this process cannot unlock it
+        if([SEMAPHORE_TABLE + 4*semind] != currPID) then
+            [[PTBR + 2*(userSP-1)/512]*512 + (userSP-1)%512] = -2;  // Return -2 to user
+            SP = userSP;                        // Restore user SP
+            [procTab + 9] = 0;                  // Clear MODE FLAG
+            ireturn;
+        endif;
+
+        [SEMAPHORE_TABLE + 4*semind] = -1;      // Release the lock — set locking PID to -1 (unlocked)
+
+        // Wake up all processes waiting on this semaphore
+        alias i R8;
+        i = 1;
+        while(i < 16) do
+            alias procTable R9;
+            procTable = PROCESS_TABLE + 16*i;   // Get process table entry for process i
+            // If process i is waiting on this semaphore, move it to READY state
+            if([procTable + 4] == WAIT_SEMAPHORE && [procTable + 5] == semind) then
+                [procTable + 4] = READY;        // Set state to READY
+                [procTable + 5] = -1;           // Clear WAIT_INFO
+            endif;
+            i = i + 1;
+        endwhile;
+    endif;
+    // If semaphore was already unlocked (locking PID == -1), nothing to do — still return success
+
+    [procTab + 9] = 0;                          // Clear MODE FLAG
+    SP = userSP;                                // Restore user SP
+    [[PTBR + 2*(userSP-1)/512]*512 + (userSP-1)%512] = 0;  // Return 0 (success) to user
+    ireturn;
+endif;

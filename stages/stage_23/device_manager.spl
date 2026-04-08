@@ -1,0 +1,113 @@
+// Module 4 - Device manager - Terminal and Disk
+alias functionNum R1;
+alias currentPID R2;
+
+// Disk Store (functionNum == 1)
+// Arguments: currentPID (R2), pageNumber (R3), blockNumber (R4)
+if(functionNum == 1) then
+    alias pageNumber R3;
+    alias blockNumber R4;
+
+    // Acquire the disk lock by calling Acquire Disk (function 3) in MOD_0
+    // This will block the process in WAIT_DISK state if disk is busy
+    // and only return when disk is free and locked for this process
+    multipush(R1, R2, R3, R4);
+    R1 = 3;         // function number: Acquire Disk
+    R2 = R2;        // pass current PID as argument
+    call MOD_0;
+    // Restore registers after Acquire Disk returns
+    // At this point, disk is locked and free to use
+    multipop(R1, R2, R3, R4);
+
+    // Update the Disk Status Table to reflect the ongoing store operation
+    // Set LOAD/STORE bit to 1 indicating a store operation (1 = store, 0 = load)
+    [DISK_STATUS_TABLE + 1] = 1;
+    // Set the PAGE NUMBER field to the page being stored
+    [DISK_STATUS_TABLE + 2] = pageNumber;
+    // Set the BLOCK NUMBER field to the disk block being written to
+    [DISK_STATUS_TABLE + 3] = blockNumber;
+
+    // Initiate the actual disk store operation
+    // This is an asynchronous operation - it starts the transfer
+    // and returns immediately without waiting for completion
+    store(pageNumber, blockNumber);
+
+    // Set the current process state to WAIT_DISK
+    // The process must wait until the store operation completes
+    // The disk interrupt handler will set this process back to READY
+    // when the store is done
+    [PROCESS_TABLE + currentPID*16 + 4] = WAIT_DISK;
+
+    // Call the scheduler to run another process while waiting
+    // When the disk interrupt fires and sets this process to READY,
+    // the scheduler will eventually resume execution from here
+    call MOD_5;
+
+    // Disk store is complete (disk interrupt has fired and woken us up)
+    
+    return;
+endif;
+
+// Disk load
+if(functionNum == 2) then
+	alias pageNumber R3;
+	alias blockNumber R4;
+	multipush(R1, R2, R3, R4);
+	R1 = 3;
+	R2 = R2;
+	call MOD_0;
+
+	multipop(R1, R2, R3, R4);
+	[DISK_STATUS_TABLE + 1] = 0;
+	[DISK_STATUS_TABLE + 2] = pageNumber;
+	[DISK_STATUS_TABLE + 3] = blockNumber;
+	load(pageNumber, blockNumber);
+	[PROCESS_TABLE + currentPID*16 + 4] = WAIT_DISK;
+	call MOD_5;
+	return;
+	
+endif;
+
+
+// Terminal Write
+if(functionNum == 3) then
+	alias word R3;
+	multipush(R1, R2, R3);
+	functionNum = 8;
+	currentPID = currentPID;
+	
+	call MOD_0;
+
+	multipop(R1, R2, R3);
+
+	print word;
+	multipush(R1, R2, R3);
+	functionNum = 9;
+	currentPID = currentPID;
+	call MOD_0;
+	multipop(R1, R2, R3);
+	return;
+endif;
+
+//Terminal Read 
+if(functionNum == 4) then
+	alias word R3;
+	multipush(R1, R2, R3);
+	functionNum = 8;
+	currentPID = currentPID;
+	
+	call MOD_0;
+	multipop(R1, R2, R3);
+	read;
+
+	[PROCESS_TABLE + 16*currentPID + 4] = WAIT_TERMINAL;
+
+	multipush(R1, R2, R3);
+	call MOD_5;
+	multipop(R1, R2, R3);
+	alias phyAddr R4;
+	phyAddr = [PAGE_TABLE_BASE + currentPID*20 + 2*word/512]*512 + word%512;
+	[phyAddr] = [PROCESS_TABLE + 16*currentPID + 8];
+	return;
+
+endif;

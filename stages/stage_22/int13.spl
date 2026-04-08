@@ -1,0 +1,97 @@
+alias userSP R1;
+userSP = SP;                                    // Save user stack pointer
+alias currPID R2;
+currPID = [SYSTEM_STATUS_TABLE + 1];            // Get current running process PID
+alias procTab R3;
+procTab = PROCESS_TABLE + currPID*16;           // Get current process's process table entry
+alias syscall R4;
+syscall = [[PTBR + 2*(userSP-5)/512]*512 + (userSP-5)%512];  // Read syscall number from user stack
+[procTab + 13] = userSP;                        // Save user SP in process table (USER SP field)
+SP = [procTab + 11]*512 - 1;                    // Switch to kernel stack (UPTR field holds user area page)
+[procTab + 9] = syscall;                        // Store syscall number in MODE FLAG
+
+// SEMGET (syscall 17)
+// Allocates a new semaphore for the current process.
+// Returns: semaphore descriptor (0–7) on success, -1 if no free slot, -2 if semaphore table is full.
+if(syscall == 17) then
+
+    alias resTab R5;
+    resTab = (([procTab + 11]+1)*512)-16;       // Per-process resource table is in the last 16 words of the user area page
+
+    alias i R6;
+    i = 0;
+    // Find first free slot in the per-process resource table (entry == -1 means free)
+    while([resTab + 2*i] != -1) do
+        i = i + 1;
+    endwhile;
+
+    // If all 8 resource table entries are occupied, no semaphore descriptor is available
+    if(i == 16) then
+        [[PTBR + 2*(userSP-1)/512]*512 + (userSP-1)%512] = -1;  // Return -1 to user
+        SP = [procTab + 13];                    // Restore user SP
+        [procTab + 9] = 0;                      // Clear MODE FLAG
+        ireturn;
+    endif;
+
+    resTab = resTab + 2*i;                      // Point resTab to the chosen free entry
+    [resTab] = 1;                               // Mark resource type as SEMAPHORE (1)
+
+    // Call Acquire Semaphore (function 6) in Resource Manager (MOD_0)
+    // to get a free entry in the global semaphore table
+    multipush(R1, R2, R3, R4, R5, R6);
+    R1 = 6;                                     // Function number: Acquire Semaphore
+    R2 = currPID;                               // Argument: current PID
+    call MOD_0;
+    multipop(R1, R2, R3, R4, R5, R6);
+
+    // If Acquire Semaphore returned -1, the global semaphore table is full
+    if(R0 == -1) then
+        [[PTBR + 2*(userSP-1)/512]*512 + (userSP-1)%512] = -2;  // Return -2 to user
+        SP = [procTab + 13];                    // Restore user SP
+        [procTab + 9] = 0;                      // Clear MODE FLAG
+        ireturn;
+    endif;
+
+    [resTab + 1] = R0;                          // Store semaphore table index in resource table entry
+    [[PTBR + 2*(userSP-1)/512]*512 + (userSP-1)%512] = R6;  // Return semaphore descriptor (i) to user
+
+    SP = [procTab + 13];                        // Restore user SP
+    [procTab + 9] = 0;                          // Clear MODE FLAG
+    ireturn;
+endif;
+
+//  SEMRELEASE (syscall 18) 
+// Releases a semaphore previously acquired by the process.
+// Returns: 0 on success, -1 on invalid semaphore descriptor.
+if(syscall == 18) then
+
+    alias semid R5;
+    semid = [[PTBR + 2*(userSP-4)/512]*512 + (userSP-4)%512];  // Read semaphore descriptor from user stack (arg1)
+
+    alias resTab R6;
+    resTab = (([procTab + 11]+1)*512)-16;       // Per-process resource table base address
+
+    // Validate semid: must be in range 0–7 and the resource table entry must be a semaphore (type == 1)
+    if(semid < 0 || semid > 7 || [resTab + 2*semid] != 1) then
+        SP = [procTab + 13];                    // Restore user SP
+        [procTab + 9] = 0;                      // Clear MODE FLAG
+        [[PTBR + 2*(userSP-1)/512]*512 + (userSP-1)%512] = -1;  // Return -1 to user
+        ireturn;
+    endif;
+
+    // Call Release Semaphore (function 7) in Resource Manager (MOD_0)
+    // to free the global semaphore table entry and wake up any waiting processes
+    multipush(R1, R2, R3, R4, R5, R6);
+    R1 = 7;                                     // Function number: Release Semaphore
+    R3 = currPID;                               // Argument: current PID
+    R2 = [resTab + 2*semid + 1];               // Argument: semaphore table index (from resource table)
+    call MOD_0;
+    multipop(R1, R2, R3, R4, R5, R6);
+
+    [resTab] = -1;                              // Mark resource table entry type as free
+    [resTab + 1] = -1;                          // Clear semaphore table index from resource table entry
+    SP = [procTab + 13];                        // Restore user SP
+    [procTab + 9] = 0;                          // Clear MODE FLAG
+    [[PTBR + 2*(userSP-1)/512]*512 + (userSP-1)%512] = 0;  // Return 0 (success) to user
+    ireturn;
+endif;

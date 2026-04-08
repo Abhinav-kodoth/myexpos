@@ -1,0 +1,140 @@
+alias functionNumber R1;
+alias currentPID R2;
+
+// GET PCB ENTRY (functionNumber == 1)
+// Scans process table for a TERMINATED slot, initializes it, returns PID in R0 (-1 if none free)
+if (functionNumber == 1) then
+    alias i R3;
+    i = 1;
+    while (i < 16) do
+        if ([PROCESS_TABLE + i * 16 + 4] == TERMINATED) then
+            break;
+        endif;
+        i = i + 1;
+    endwhile;
+    if (i == 16) then
+        R0 = -1;                                            // No free slot found
+    else
+        [PROCESS_TABLE + i * 16 + 4] = ALLOCATED;          // Mark slot as ALLOCATED
+        [PROCESS_TABLE + i * 16 + 1] = i;                  // Set PID field
+        [PROCESS_TABLE + i * 16 + 14] = PAGE_TABLE_BASE + (20 * i);  // Set page table base
+        [PROCESS_TABLE + i * 16 + 15] = 10;                // Set page table length
+        R0 = i;                                             // Return new PID
+    endif;
+    return;
+endif;
+
+// FREE USER AREA PAGE (functionNumber == 2)
+// Releases all unreleased semaphores in the per-process resource table,
+// then frees the user area page via Memory Manager
+if (functionNumber == 2) then
+    alias userAreaPageNumber R3;
+    userAreaPageNumber = [PROCESS_TABLE + 16 * currentPID + 11];  // User area page number from process table
+
+    // Iterate per-process resource table (starts at RESOURCE_TABLE_OFFSET within user area page)
+    // Each entry is 2 words: [Resource Identifier, Semaphore Table Index]
+    alias i R4;
+    i = RESOURCE_TABLE_OFFSET;
+    while (i < 512) do
+        // If this entry is a semaphore, invoke Release Semaphore (Resource Manager fn 7)
+        if ([[PROCESS_TABLE + [SYSTEM_STATUS_TABLE + 1] * 16 + 11] * 512 + i] == SEMAPHORE) then
+            multipush(R0, R1, R2, R3, R4);
+            R1 = 7;                                         // Resource Manager fn 7: Release Semaphore
+            R2 = [[PROCESS_TABLE + [SYSTEM_STATUS_TABLE + 1] * 16 + 11] * 512 + i + 1];  // Semaphore table index
+            R3 = [SYSTEM_STATUS_TABLE + 1];                 // Current PID from system status table
+            call RESOURCE_MANAGER;
+            multipop(R0, R1, R2, R3, R4);
+        endif;
+        i = i + 2;
+    endwhile;
+
+    // Free the user area page via Memory Manager (MOD_2 fn 2: Release Page)
+    multipush(R1, R2, R3);
+    R1 = 2;
+    R2 = userAreaPageNumber;
+    call MOD_2;
+    multipop(R1, R2, R3);
+    return;
+endif;
+
+// EXIT PROCESS (functionNumber == 3)
+// Frees page table and user area page, marks process TERMINATED,
+// wakes up waiting processes and clears PPID references (if not called from exec)
+if (functionNumber == 3) then
+    multipush(R1, R2);
+    R1 = 4;                                                 // MOD_1 fn 4: Free Page Table
+    R2 = currentPID;
+    call MOD_1;
+    R1 = 2;                                                 // MOD_1 fn 2: Free User Area Page
+    R2 = currentPID;
+    call MOD_1;
+    multipop(R1, R2);
+
+    // Skip wakeup/cleanup if Exit Process was invoked from Exec (MODE FLAG == 9)
+    if ([PROCESS_TABLE + currentPID * 16 + 9] != 9) then
+        alias i R3;
+        i = 0;
+        while (i < 16) do
+            // Wake up any process blocked waiting for this process to exit
+            if ([PROCESS_TABLE + i * 16 + 4] == WAIT_PROCESS && [PROCESS_TABLE + i * 16 + 5] == currentPID) then
+                [PROCESS_TABLE + i * 16 + 4] = READY;
+            endif;
+            // Clear PPID of any child whose parent is this process
+            if ([PROCESS_TABLE + i * 16 + 2] == currentPID) then
+                [PROCESS_TABLE + i * 16 + 2] = -1;
+            endif;
+            i = i + 1;
+        endwhile;
+    endif;
+
+    [PROCESS_TABLE + 16 * currentPID + 4] = TERMINATED;    // Mark process as TERMINATED
+    return;
+endif;
+
+// FREE PAGE TABLE (functionNumber == 4)
+// Invalidates heap entries, frees all valid physical pages (except code page 0),
+// then releases any disk blocks outside the swap area from the disk map table
+if (functionNumber == 4) then
+    // Invalidate the two heap page table entries
+    [PTBR + 0] = -1;
+    [PTBR + 1] = "0000";
+    [PTBR + 2] = -1;
+    [PTBR + 3] = "0000";
+
+    alias i R3;
+    alias pageNumber R4;
+    i = 1;
+    // Free all valid physical pages for entries 1..(PTLR-2) via Memory Manager
+    while (i < (PTLR - 1)) do
+        pageNumber = [PTBR + 2 + 2 * i];
+        if (pageNumber != -1) then
+            multipush(R1, R2, R3, R4);
+            R1 = 2;                                         // Memory Manager fn 2: Release Page
+            R2 = pageNumber;
+            call MOD_2;
+            multipop(R1, R2, R3, R4);
+            [PTBR + 2 + 2 * i] = -1;                       // Invalidate page table entry
+            [PTBR + 3 + 2 * i] = "0000";
+        endif;
+        i = i + 1;
+    endwhile;
+
+    // Clear disk map entries for indices 2–9
+    // Indices 4–7 are swap-area blocks — skip releasing those via Memory Manager
+    i = 2;
+    while (i < 10) do
+        if ([DISK_MAP_TABLE + currentPID * 10 + i] != -1) then
+            if (i < 4 || i > 7) then                       // Not a swap-area entry
+                multipush(R1, R2, R3, R4);
+                R1 = 4;                                     // Memory Manager fn 4: Release Disk Block
+                R3 = currentPID;
+                R2 = [DISK_MAP_TABLE + currentPID * 10 + i];
+                call MOD_2;
+                multipop(R1, R2, R3, R4);
+            endif;
+            [DISK_MAP_TABLE + currentPID * 10 + i] = -1;   // Clear disk map entry regardless
+        endif;
+        i = i + 1;
+    endwhile;
+    return;
+endif;

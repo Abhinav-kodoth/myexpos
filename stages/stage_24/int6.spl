@@ -1,0 +1,154 @@
+// Set mode flag to system call number (7 = Read system call)
+[PROCESS_TABLE + [SYSTEM_STATUS_TABLE + 1] * 16 + 9] = 7;
+
+// Save user SP and switch to kernel stack
+alias userSP R0;
+userSP = SP;
+[PROCESS_TABLE + [SYSTEM_STATUS_TABLE + 1] * 16 + 13] = SP;        // save user SP to process table
+SP = [PROCESS_TABLE + [SYSTEM_STATUS_TABLE + 1] * 16 + 11] * 512 - 1; // switch to kernel stack
+
+// Compute physical address of return value location (userSP - 1)
+alias returnAddress R1;
+returnAddress = [PTBR + 2 * ((userSP - 1) / 512)] * 512 + (userSP - 1) % 512;
+
+// Read file descriptor argument from user stack (userSP - 4)
+alias fileDescriptor R2;
+fileDescriptor = [[PTBR + 2 * ((userSP - 4) / 512)] * 512 + (userSP - 4) % 512];
+
+// fileDescriptor == -1 means terminal read, anything else means file read
+if (fileDescriptor != -1) then 
+	// ── FILE READ ────────────────────────────────────────────────────
+
+	// Validate file descriptor range (must be 0 to 7)
+	if (fileDescriptor < 0 || fileDescriptor > 7) then
+        [returnAddress] = -1;   // invalid file descriptor
+    else
+        // Compute physical address of the resource table entry for this file descriptor
+        
+        // Each entry is 2 words: [Resource Identifier, Open File Table index]
+        alias resourceTableEntry R3;
+        resourceTableEntry = [PROCESS_TABLE + [SYSTEM_STATUS_TABLE + 1] * 16 + 11] * 512 + RESOURCE_TABLE_OFFSET + fileDescriptor * 2;
+
+        // Check that this resource table entry is actually a FILE (not semaphore or free)
+        if ([resourceTableEntry + 0] != FILE) then
+            [returnAddress] = -1;   // descriptor does not point to a file
+        else
+            alias inodeIndex R4;
+            alias openFileTableEntry R5;
+
+            // Get the Open File Table index from resource table entry (second word)
+            openFileTableEntry = [resourceTableEntry + 1];
+
+            // Get the inode index from the Open File Table entry (first word)
+            inodeIndex = [OPEN_FILE_TABLE + openFileTableEntry * 4 + 0];
+
+            // Acquire inode lock (function 4 in Resource Manager)
+            // Prevents another process from deleting the file while we read
+            multipush(R0, R1, R2, R3, R4, R5);
+            R1 = 4;                          // function: Acquire Inode
+            R2 = inodeIndex;
+            R3 = [SYSTEM_STATUS_TABLE + 1];  // current PID
+            call RESOURCE_MANAGER;
+            R9 = R0;                         // save return value (0=success, -1=file deleted)
+            multipop(R0, R1, R2, R3, R4, R5);
+
+            // If acquire inode failed, file was deleted while waiting
+            if (R9 == -1) then
+                [returnAddress] = -1;
+            else
+                // lSeek points to the SEEK POSITION word in the Open File Table entry
+                // offset 2 in each Open File Table entry = current seek position
+                alias lSeek R6;
+                lSeek = OPEN_FILE_TABLE + openFileTableEntry * 4 + 2;
+
+                // Read the buffer/variable address argument from user stack (userSP - 3)
+                // This is the LOGICAL address where the read word should be stored
+                alias wordAddress R7;
+                wordAddress = [[PTBR + 2 * ((userSP - 3) / 512)] * 512 + (userSP - 3) % 512];
+
+                // Translate the logical wordAddress to physical address for writing
+                wordAddress = [PTBR + 2 * (wordAddress / 512)] * 512 + wordAddress % 512;
+
+                //  ROOT FILE READ 
+                // Root file is handled differently — it lives at a fixed memory location
+                if (inodeIndex == INODE_ROOT) then
+                    // Root file has 480 entries — seek position 480 means end of file
+                    if ([lSeek] == 480) then
+                        [returnAddress] = -2;   // end of file reached
+                    else
+                        // Read directly from ROOT_FILE memory area using seek as word index
+                        [wordAddress] = [ROOT_FILE + [lSeek]];
+                        [lSeek] = [lSeek] + 1;  // advance seek position by 1 word
+                        [returnAddress] = 0;     // success
+                    endif;
+                else
+                    //  DATA FILE READ 
+                    // Check if seek position has reached end of file
+                    // FILE SIZE is at offset 2 in the inode entry
+                    if ([lSeek] == [INODE_TABLE + inodeIndex * 16 + 2]) then
+                        [returnAddress] = -2;   // end of file — nothing more to read
+                    else
+                        alias diskBlock R11;
+                        alias offset R12;
+
+                      
+                        diskBlock = [INODE_TABLE + inodeIndex * 16 + 8 + ([lSeek] / 512)];
+
+                        // Offset within that disk block = lSeek % 512
+                        offset = [lSeek] % 512;
+
+                        // Call Buffer Read (function 2) in File Manager (MOD_3)
+                        // Loads the disk block into buffer if not already there
+                        // and reads the word at 'offset' into 'wordAddress'
+                        multipush(R0, R1, R2, R3, R4, R5, R6, R7, R11, R12);
+                        R1 = 2;           // function: Buffer Read
+                        R2 = diskBlock;   // disk block number to read from
+                        R3 = offset;      // word offset within the block
+                        R4 = wordAddress; // physical memory address to store the word
+                        call FILE_MANAGER;
+                        multipop(R0, R1, R2, R3, R4, R5, R6, R7, R11, R12);
+
+                        [lSeek] = [lSeek] + 1;  // advance seek position by 1 word
+                        [returnAddress] = 0;     // success
+                    endif;
+                endif;
+                
+                // Release the inode lock (function 5 in Resource Manager)
+                // Must always release what was acquired — even after end of file
+                multipush(R0, R1, R2, R3, R4, R5, R6, R7, R11, R12);
+                R1 = 5;                          // function: Release Inode
+                R2 = inodeIndex;
+                R3 = [SYSTEM_STATUS_TABLE + 1];  // current PID
+                call RESOURCE_MANAGER;
+                multipop(R0, R1, R2, R3, R4, R5, R6, R7, R11, R12);
+            endif;
+        endif;
+    endif;
+else 
+	//  TERMINAL READ 
+	// fileDescriptor == -1 means read from terminal (stdin)
+
+    // Read the logical address of the variable to store input into (userSP - 3)
+    alias wordAddress R3;
+    wordAddress = [[PTBR + 2 * ((userSP - 3) / 512)] * 512 + (userSP - 3) % 512];
+
+    // Call Terminal Read (function 4) in Device Manager (MOD_4)
+    // Blocks process until user types input, then stores it at wordAddress
+    multipush(R0, R1, R2, R3);
+    R1 = 4;                          // function: Terminal Read
+    R2 = [SYSTEM_STATUS_TABLE + 1];  // current PID
+    R3 = wordAddress;                // where to store the input word
+    call MOD_4;
+    multipop(R0, R1, R2, R3);
+
+    [returnAddress] = 0;   // terminal read always succeeds
+endif;
+
+
+[PROCESS_TABLE + [SYSTEM_STATUS_TABLE + 1] * 16 + 9] = 0;
+
+// Restore user stack pointer from process table
+SP = [PROCESS_TABLE + [SYSTEM_STATUS_TABLE + 1] * 16 + 13];
+
+// Switch back to user mode
+ireturn;

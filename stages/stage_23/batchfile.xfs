@@ -1,0 +1,24 @@
+load --os $HOME/myexpos/stages/stage_14/os_startup.xsm
+load --init /home/abhinav/myexpos/stages/stage_21/shell_2.xsm
+load --idle $HOME/myexpos/stages/stage_14/idle.xsm
+load --int=timer $HOME/myexpos/stages/stage_14/timer.xsm
+load --int=6 $HOME/myexpos/stages/stage_16/int6.xsm
+load --int=4 /home/abhinav/myexpos/stages/stage_23/int4.xsm
+load --int=7 $HOME/myexpos/stages/stage_15/int7.xsm
+load --int=8 $HOME/myexpos/stages/stage_22/fork.xsm
+load --int=9 /home/abhinav/myexpos/stages/stage_19/int_9.xsm
+load --int=10 $HOME/myexpos/stages/stage_20/int10.xsm
+load --int=11 $HOME/myexpos/stages/stage_21/interrupt_11.xsm
+load --int=15 /home/abhinav/myexpos/stages/stage_23/int15.xsm
+load --int=13 /home/abhinav/myexpos/stages/stage_22/int13.xsm
+load --int=14 /home/abhinav/myexpos/stages/stage_22/int14.xsm
+load --int=console $HOME/myexpos/stages/stage_16/console_int.xsm
+load --int=disk /home/abhinav/myexpos/stages/stage_18/disk.xsm
+load --exhandler $HOME/myexpos/stages/stage_19/exhandler.xsm
+load --module 0 /home/abhinav/myexpos/stages/stage_23/resource_manager.xsm
+load --module 1 /home/abhinav/myexpos/stages/stage_22/process_manager.xsm
+load --module 2 $HOME/myexpos/stages/stage_19/memory_manager.xsm
+load --module 4 $HOME/myexpos/stages/stage_23/device_manager.xsm
+load --module 5 $HOME/myexpos/stages/stage_20/scheduler.xsm
+load --module 7 $HOME/myexpos/stages/stage_23/boot_module.xsm
+load --library $HOME/myexpos/expl/library.lib

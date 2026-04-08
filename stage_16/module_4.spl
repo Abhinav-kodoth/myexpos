@@ -1,0 +1,59 @@
+
+// Function 3: Terminal Write
+// Function 4: Terminal Read
+
+alias functionNum R1;
+alias currentPID R2;
+
+// Terminal Write (Function 3)
+if(functionNum == 3) then
+  alias word R3;
+  
+  // Acquire Terminal
+  multipush(R1, R2, R3);
+  R1 = 8;  // Acquire Terminal function number
+  call MOD_0;
+  multipop(R1, R2, R3);
+  
+  // Print the word
+  print word;
+  
+  // Release Terminal
+  multipush(R1, R2, R3);
+  R1 = 9;  // Release Terminal function number
+  call MOD_0;
+  multipop(R1, R2, R3);
+  
+  return;
+endif;
+
+
+if(functionNum == 4) then
+ 
+  
+  
+  multipush(R1, R2, R3);
+  R1 = 8;              // Function number: Acquire Terminal
+  call MOD_0;          // Call Resource Manager
+  multipop(R1, R2, R3);
+  
+  
+  read;
+  
+
+  [PROCESS_TABLE + currentPID * 16 + 4] = WAIT_TERMINAL;
+  
+ 
+  multipush(R1, R2, R3);
+  call MOD_5;          // Call Scheduler
+  multipop(R1, R2, R3);
+  
+
+  
+ 
+  [[PTBR + 2 * (R3 / 512)] * 512 + (R3 % 512)] = [PROCESS_TABLE + currentPID * 16 + 8];
+  
+  // Step 16: Return to caller
+  return;
+endif;
+

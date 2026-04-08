@@ -1,0 +1,62 @@
+
+alias userSP R0;
+alias processTable R1;
+alias currentPID R2;
+
+// Get current process details
+currentPID = [SYSTEM_STATUS_TABLE + 1];
+processTable = PROCESS_TABLE + currentPID * 16;
+
+//  Set MODE FLAG to 7 (Read system call)
+[processTable + 9] = 7;
+
+//  Save user stack pointer
+userSP = SP;
+
+//  Save user SP in UPTR field of process table
+[processTable + 13] = userSP;
+
+// Set kernel stack pointer
+// User area page number is at offset 11
+SP = [processTable + 11] * 512 - 1;
+
+// Retrieve file descriptor from user stack (at userSP-4)
+alias fileDescriptor R3;
+fileDescriptor = [[PTBR + 2 * ((userSP - 4) / 512)] * 512 + ((userSP - 4) % 512)];
+
+// If file descriptor is not -1, return error (only terminal supported now)
+if (fileDescriptor != -1) then
+    [[PTBR + 2 * ((userSP - 1) / 512)] * 512 + ((userSP - 1) % 512)] = -1;
+else
+    //  File descriptor is -1 (terminal/console read)
+    
+    // Retrieve word address (buffer address) from user stack (at userSP-3)
+    alias wordAddress R4;
+    wordAddress = [[PTBR + 2 * ((userSP - 3) / 512)] * 512 + ((userSP - 3) % 512)];
+    
+    // Push registers used so far
+    multipush(R0, R1, R2, R3, R4);
+    
+    // Set up arguments for Terminal Read function (Function 3 in Module 4)
+    R1 = 3;              // Function number: Terminal Read
+    R2 = currentPID;     // PID of current process
+    R3 = wordAddress;    // Buffer address where input will be stored
+    
+    // Call device manager module (Module 4)
+    call MOD_4;
+    
+    // Terminal Read has no return value (process gets blocked)
+    
+    // estore registers
+    multipop(R0, R1, R2, R3, R4);
+    
+    // Store 0 as return value indicating success
+    [[PTBR + 2 * ((userSP - 1) / 512)] * 512 + ((userSP - 1) % 512)] = 0;
+endif;
+
+// Reset MODE FLAG to 0
+[processTable + 9] = 0;
+
+// Switch back to user stack and return to user mode
+SP = userSP;
+ireturn;

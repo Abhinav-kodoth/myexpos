@@ -1,0 +1,168 @@
+// Save current SP to UPTR field (word 13) of process table before switching to kernel stack
+[PROCESS_TABLE + [SYSTEM_STATUS_TABLE + 1] * 16 + 13] = SP;
+
+alias userSP R0;
+userSP = SP;
+// Switch SP to kernel stack: UserAreaPage * 512 - 1
+SP = [PROCESS_TABLE + [SYSTEM_STATUS_TABLE + 1] * 16 + 11] * 512 - 1;
+
+// Set MODE FLAG (word 9) to 9 indicating exec system call is running
+
+[PROCESS_TABLE + [SYSTEM_STATUS_TABLE + 1] * 16 + 9] = 9;
+
+alias physicalPageNumber R1;
+alias offset R2;
+alias physicalAddress R3;
+alias page_table R5;
+
+// Compute base address of page table for current process (each page table = 20 words)
+page_table = PAGE_TABLE_BASE + 20 * [SYSTEM_STATUS_TABLE + 1];
+
+// Translate logical address (userSP - 4) to physical to read argument 1 (filename)
+physicalPageNumber = [page_table + 2 * ((userSP - 4) / 512)];
+offset = (userSP - 4) % 512;
+physicalAddress = physicalPageNumber * 512 + offset;
+
+alias fileName R6;
+// Read filename from the computed physical address
+fileName = [physicalAddress];
+
+alias inodeEntry R7;
+alias flag R8;
+
+inodeEntry = 0;
+flag = 0;
+
+// Search inode table for file matching fileName and of type EXEC
+// Each inode entry = 16 words; word 0 = file type, word 1 = file name
+
+while (inodeEntry < MAX_FILE_NUM) do
+    if (fileName == [INODE_TABLE + inodeEntry * 16 + 1]) then
+        if ([INODE_TABLE + inodeEntry * 16] == EXEC) then
+            flag = 1;
+            break;
+        endif;
+    endif;
+    inodeEntry = inodeEntry + 1;
+endwhile;
+
+// If file not found or not EXEC type, write -1 as return value and go back to user mode
+
+if (flag == 0) then
+    physicalPageNumber = [page_table + 2 * ((userSP - 1) / 512)];
+    offset = (userSP - 1) % 512;
+    [physicalPageNumber * 512 + offset] = -1;
+    [PROCESS_TABLE + [SYSTEM_STATUS_TABLE + 1] * 16 + 9] = 0;
+    SP = userSP;
+    ireturn;
+endif;
+
+// Call Exit Process (Module 1, function 3)
+// Frees heap, stack, code pages via Free Page Table
+// Frees user area page via Free User Area Page
+// Sets process state to TERMINATED
+multipush(R0, R1, R2, R3, R4, R5, R6, R7, R8);
+
+R1 = 3;
+R2 = [SYSTEM_STATUS_TABLE + 1];
+
+call MOD_1;
+
+multipop(R0, R1, R2, R3, R4, R5, R6, R7, R8);
+
+// Reclaim the same user area page for new process kernel stack
+// Exit Process freed it, so we undo that by incrementing its free list entry
+// and decrementing MEM_FREE_COUNT to mark it as in use again
+
+alias userAreaPageNumber R9;
+userAreaPageNumber = [PROCESS_TABLE + [SYSTEM_STATUS_TABLE + 1] * 16 + 11];
+
+[MEMORY_FREE_LIST + userAreaPageNumber] = [MEMORY_FREE_LIST + userAreaPageNumber] + 1;
+
+[SYSTEM_STATUS_TABLE + 2] = [SYSTEM_STATUS_TABLE + 2] - 1;
+// Reset SP to top of reclaimed user area page for new kernel stack
+SP = userAreaPageNumber * 512;
+
+// New process reuses same PID - update state to RUNNING and store inode index
+[PROCESS_TABLE + [SYSTEM_STATUS_TABLE + 1] * 16 + 4] = RUNNING;
+[PROCESS_TABLE + [SYSTEM_STATUS_TABLE + 1] * 16 + 7] = inodeEntry;
+
+// Allocating pages
+// Library
+[PTBR + 0] = 63;
+[PTBR + 1] = "0100";
+[PTBR + 2] = 64;
+[PTBR + 3] = "0100";
+
+multipush(R0, R1, R2, R3, R4, R5, R6, R7, R8, R9);
+
+
+// Heap - allocate 2 pages (logical pages 2 and 3), read-write "0110"
+R1 = 1;
+call MOD_2;
+[PTBR + 4] = R0;
+[PTBR + 5] = "0110";
+
+R1 = 1;
+call MOD_2;
+[PTBR + 6] = R0;
+[PTBR + 7] = "0110";
+
+// Stack
+R1 = 1;
+call MOD_2;
+[PTBR + 16] = R0;
+[PTBR + 17] = "0110";
+
+R1 = 1;
+call MOD_2;
+[PTBR + 18] = R0;
+[PTBR + 19] = "0110";
+
+multipop(R0, R1, R2, R3, R4, R5, R6, R7, R8, R9);
+
+// Code - calculate number of blocks from inode table
+// Word 2 of inode entry = file size in words; ceil(size/512) gives block count
+alias numBlocks R10;
+alias i R11;
+
+i = 0;
+numBlocks = (([INODE_TABLE + 16 * inodeEntry + 2] - 1) / 512) + 1;
+
+multipush(R0, R1, R2, R3, R4, R5, R6, R7, R8, R9);
+// Allocate code pages (logical pages 4-7), read-only "0100"
+// Only allocate for actual blocks; mark remaining entries as invalid
+
+// Allocate code pages (logical pages 4-7), read-only "0100"
+// Only allocate for actual blocks; mark remaining entries as invalid
+
+while (i < 4) do
+    if (i < numBlocks) then
+        R1 = 1;
+        call MOD_2;
+        [PTBR + 8 + 2 * i] = R0;
+        [PTBR + 9 + 2 * i] = "0100";
+    else
+        [PTBR + 8 + 2 * i] = -1;
+        [PTBR + 9 + 2 * i] = "0000";
+    endif;
+    i = i + 1;
+endwhile;
+
+multipop(R0, R1, R2, R3, R4, R5, R6, R7, R8, R9);
+// Load each code block from disk to its allocated memory page
+
+// Inode words 8-11 store the disk block numbers for each code block
+i = 0;
+while (i < numBlocks) do
+    loadi([PTBR + 8 + 2 * i], [INODE_TABLE + inodeEntry * 16 + 8 + i]);
+    i = i + 1;
+endwhile;
+
+// [PTBR+16] = first stack page; [PTBR+8] = first code page
+[[PTBR + 16] * 512] = [[PTBR + 8] * 512 + 1];
+
+SP = 8 * 512;
+[PROCESS_TABLE + [SYSTEM_STATUS_TABLE + 1] * 16 + 9] = 0;
+
+ireturn;

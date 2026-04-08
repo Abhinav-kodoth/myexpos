@@ -1,0 +1,21 @@
+alias functionNum R1;
+alias currentPID R2;
+
+if (functionNum == 8) then // Acquire Terminal
+    while ([TERMINAL_STATUS_TABLE] != 0) do
+        [PROCESS_TABLE + currentPID * 16 + 4] = WAIT_TERMINAL;
+        multipush(R1, R2);
+
+        call MOD_5;
+
+        multipop(R1, R2);
+    endwhile;
+
+    [TERMINAL_STATUS_TABLE] = 1;
+    [TERMINAL_STATUS_TABLE + 1] = currentPID;
+    return;
+
+endif;
+
+
+

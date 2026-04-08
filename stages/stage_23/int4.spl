@@ -1,0 +1,240 @@
+//Create and Delete Calls
+
+// Switch to Kernel Stack
+// Save value of SP to USER SP field in Process Table
+alias userSP R1;
+userSP = SP;
+alias currPID R2;
+currPID = [SYSTEM_STATUS_TABLE + 1];
+alias procTab R3;
+procTab = PROCESS_TABLE + 16*currPID;
+
+// Save the value of SP to the USER SP field in the Process Table entry
+[procTab + 13] = SP;
+
+// Set the value of SP to the beginning of User Area Page (kernel stack)
+SP = [procTab + 11]*512 -1;
+
+// Read the system call number from the user stack (userSP - 5)
+alias syscall R4;
+syscall = [[PTBR + 2*(userSP -5)/512]*512 + (userSP-5)%512];
+
+// Set the MODE_FLAG in the process table entry to the system call number
+// indicating that the process is in a system call
+[procTab + 9] = syscall;
+
+
+// CREATE SYSTEM CALL (syscall == 1) 
+if(syscall == 1) then
+
+    // Read filename argument from user stack (userSP - 4)
+    alias filename R5;
+    // Read permission argument from user stack (userSP - 3)
+    alias permission R6;
+    filename = [[PTBR + 2*(userSP -4)/512]*512 + (userSP-4)%512];
+    permission = [[PTBR + 2*(userSP -3)/512]*512 + (userSP-3)%512];
+
+    // Check if the file already exists in the Inode Table
+    // If file is present in the system, return 0 (success, no duplicate created)
+    alias i R7;
+    i=1;
+    while(i<MAX_FILE_NUM) do
+        if([INODE_TABLE + i*16 + 1] == filename) then
+            R11 = 0;          // file already exists, return 0
+            goto retLabel;    // jump to cleanup and return
+        endif; 
+        i = i + 1;
+    endwhile;
+
+    // Find the index of a free entry in the Inode Table
+    // A free entry has filename field set to -1
+    i = 1;
+    while(i<MAX_FILE_NUM) do
+        if([INODE_TABLE + i*16 + 1] == -1) then
+            break;            // found a free inode entry
+        endif;
+        i = i + 1;
+    endwhile;
+
+    // If no free entry found, maximum number of files reached, return -1
+    if(i == MAX_FILE_NUM) then
+        R11 = -1;
+        goto retLabel;
+    endif;
+
+    // In the Inode Table entry found above:
+    alias inodeEntry R8;
+    inodeEntry = INODE_TABLE + 16*i;
+
+    // Set FILE NAME to the given file name
+    [inodeEntry + 1] = filename;
+    // Set FILE SIZE to 0 (new file has no content)
+    [inodeEntry + 2] = 0;
+    // Set FILE TYPE to DATA
+    [inodeEntry + 0] = DATA;
+    // Set all block numbers to -1 (no disk blocks allocated yet)
+    [inodeEntry + 8] = -1;
+    [inodeEntry + 9] = -1;
+    [inodeEntry + 10] = -1;
+    [inodeEntry + 11] = -1;
+    // Set USER ID to the USERID of the current process (from process table)
+    [inodeEntry + 3] = [procTab + 3];
+    // Set PERMISSION to the permission supplied as input
+    [inodeEntry + 4] = permission;
+
+    // Update the Root File entry corresponding to this Inode Table index
+    alias rootEntry R9;
+    rootEntry = ROOT_FILE + 8*i;
+    // Set FILE NAME in root file
+    [rootEntry + 0] = filename;
+    // Set FILE SIZE to 0
+    [rootEntry + 1] = 0;
+    // Set FILE TYPE to DATA
+    [rootEntry + 2] = DATA;
+    // Set USERNAME by looking up USER TABLE using the process's user id
+    [rootEntry + 3] = [USER_TABLE + 2*[procTab + 3]];
+    // Set PERMISSION
+    [rootEntry + 4] = permission;
+
+    // Return 0 indicating success
+    R11 = 0;
+    goto retLabel;   // jump to cleanup (MODE_FLAG reset and ireturn happen there)
+endif;
+
+
+// DELETE SYSTEM CALL (syscall == 4) 
+if(syscall == 4) then
+
+    // Read filename argument from user stack (userSP - 4)
+    alias filename R5;
+    filename = [[PTBR + 2*(userSP -4)/512]*512 + (userSP-4)%512];
+
+    // Find the index of the file in the Inode Table
+    alias i R6;
+    i=1;
+    while(i<MAX_FILE_NUM) do
+        if([INODE_TABLE + i*16 + 1] == filename) then
+            break;    // found the file
+        endif;
+        i = i + 1;
+    endwhile;
+
+    // If file is not present in the Inode Table, return 0
+    if(i == MAX_FILE_NUM) then
+        R11 = 0;
+        goto retLabel;
+    endif;
+
+    alias inodeIndex R7;
+    alias inodeEntry R8;
+    inodeIndex = i;
+    inodeEntry = INODE_TABLE + 16*i;
+
+    // If the file is not a DATA file, return -1 (cannot delete EXEC or ROOT files)
+    if([inodeEntry] != DATA) then 
+        R11 = -1;
+        goto retLabel;
+    endif;
+
+    // If exclusive permission is set, check ownership
+    if([inodeEntry + 4] == EXCLUSIVE) then
+        // If the current user is not root AND does not own the file, return -1
+        if([inodeEntry + 3] != [SYSTEM_STATUS_TABLE + 0] && [SYSTEM_STATUS_TABLE] != 1) then
+            R11 = -1;
+            goto retLabel;
+        endif;
+    endif;
+
+    // Acquire a lock on the file by calling acquire_inode() 
+    // in Resource Manager module (MOD_0, function 4)
+    multipush(R1, R2, R3, R4, R5, R7, R8);
+    R1 = 4;         // function number: acquire_inode
+    R3 = currPID;   // current process PID
+    R2 = i;         // inode index
+    call MOD_0;
+    multipop(R1, R2, R3, R4, R5, R7, R8);
+
+    // Check if the file open count is -1 in the File Status Table
+    // If not -1, the file is currently open and cannot be deleted
+    alias fileStatus R9;
+    fileStatus = FILE_STATUS_TABLE + 4*i;
+    if([fileStatus + 1] != -1) then 
+        // Release the inode lock before returning
+        multipush(R1, R3);
+        R1 = 5;         // function number: release_inode
+        R3 = currPID;
+        R2 = i;
+        call MOD_0;
+        multipop(R1, R3);
+        // Return -2: file is open, cannot be deleted
+        R11 = -2;
+        goto retLabel;
+    endif;
+
+    // For each disk block allocated to the file (block entries at offsets 8-11 in inode):
+    i = 8;
+    while(i<12) do
+        alias blockNum R10;
+        blockNum = [inodeEntry + i];   // get the disk block number
+
+        // R11 is reserved for return value (retLabel uses it), so use R12 for buffer entry
+        alias buffEntry R12;
+        // Buffer table entry for this block: block% MAX_BUFFER gives buffer index
+        buffEntry = BUFFER_TABLE + (blockNum%MAX_BUFFER)*4;
+
+        if([inodeEntry + i] != -1) then    // if this block is actually allocated
+            // If the disk block is loaded into a buffer AND the DIRTY BIT is set,
+            // reset the dirty bit so the block is not written back to disk
+            if([buffEntry] == blockNum && [buffEntry + 1] == 1) then
+                [buffEntry + 1] = 0;    // reset dirty bit
+            endif;
+
+            // Call release_block() in Memory Manager (MOD_2, function 4)
+            // to free the disk block
+            multipush(R1, R2, R3, R4, R5, R6, R7, R8);
+            R1 = 4;           // function number: release_block
+            R3 = currPID;
+            R2 = blockNum;    // disk block number to release
+            call MOD_2;
+            multipop(R1, R2, R3, R4, R5, R6, R7, R8);
+        endif;
+        i = i + 1;
+    endwhile;
+
+    // Invalidate the Inode Table entry for this file (set all fields to -1)
+    i = 0;
+    while(i<16) do
+        if(i<5) then
+            // Also invalidate the first 5 fields of the Root File entry
+            [ROOT_FILE + inodeIndex*8 + i] = -1;
+        endif;
+        // Set each field of the inode entry to -1
+        [inodeEntry + i] = -1;
+        i = i + 1;
+    endwhile;
+
+    // Release the lock on the file by calling release_inode()
+    // in Resource Manager module (MOD_0, function 5)
+    multipush(R1, R3);
+    R1 = 5;         // function number: release_inode
+    R2 = currPID;
+    call MOD_0;
+    multipop(R1, R3);
+
+    // Return 0 indicating success
+    R11 = 0;
+    goto retLabel;
+endif;
+
+
+// common return label
+retLabel:
+    // Switch back to user stack by restoring SP from USER SP saved in process table
+    SP = userSP;
+    // Set the MODE_FLAG in the process table entry to 0
+    // indicating process is back in user mode
+    [procTab + 9] = 0;
+    // Write the return value (R11) to the user stack at position userSP - 1
+    [[PTBR + 2*(userSP-1)/512]*512 + (userSP-1)%512] = R11;
+    // Return to user mode
+    ireturn;

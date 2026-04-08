@@ -1,0 +1,182 @@
+breakpoint;
+alias functionNumber R1;
+alias currentPID R2;
+
+//Acquire Buffer - locks a buffer page for exclusive access by currentPID
+if (functionNumber == 1) then
+    breakpoint;
+    alias bufferNumber R2;  // buffer index in BUFFER_TABLE
+    alias currentPID R3;    // PID of requesting process
+
+    // wait if buffer is already locked by another process
+    while ([BUFFER_TABLE + bufferNumber*4 + 2] != -1) do
+        [PROCESS_TABLE + (currentPID*16) + 4] = WAIT_BUFFER;   // set state to WAIT_BUFFER
+        [PROCESS_TABLE + (currentPID*16) + 5] = bufferNumber;   // store which buffer we're waiting on
+        multipush(R1, R2, R3);
+        call SCHEDULER;   // yield CPU until buffer is free
+        multipop(R1, R2, R3);
+    endwhile;
+    [BUFFER_TABLE + bufferNumber*4 + 2] = currentPID;   // lock buffer by storing PID
+    breakpoint;
+endif;
+
+
+//Release Buffer - unlocks buffer and wakes up waiting processes
+if (functionNumber == 2) then
+    breakpoint;
+    alias bufferNumber R2;
+    alias currentPID R3;
+    if (currentPID != [BUFFER_TABLE + bufferNumber*4 + 2]) then
+        R0 = -1;   // error: process doesn't own this buffer
+    else
+        [BUFFER_TABLE + bufferNumber*4 + 2] = -1;   // unlock buffer
+
+        alias counter R4;
+        counter = 0;
+        // wake up all processes waiting on this buffer
+        while (counter < MAX_PROC_NUM) do
+            if ([PROCESS_TABLE + counter*16 + 4] == WAIT_BUFFER && [PROCESS_TABLE + counter*16 + 5] == bufferNumber) then
+                [PROCESS_TABLE + counter*16 + 4] = READY;   // move to READY state          
+            endif;
+            counter = counter+1;
+        endwhile;
+
+        R0 = 0;   // success
+    endif;
+    breakpoint;
+endif;
+
+
+//Acquire Disk - locks disk for exclusive access
+if (functionNumber == 3) then
+    breakpoint;
+    // wait if disk is busy (status == 1)
+    while ([DISK_STATUS_TABLE+0] == 1) do
+        [PROCESS_TABLE + (currentPID*16) + 4] = WAIT_DISK;   // set state to WAIT_DISK
+        multipush(R1, R2, R3);
+        call SCHEDULER;   // yield CPU until disk is free
+        multipop(R1, R2, R3);
+    endwhile;
+    [DISK_STATUS_TABLE + 0] = 1;         // mark disk as busy
+    [DISK_STATUS_TABLE + 4] = currentPID;  // record which process owns disk
+endif;
+
+
+//Acquire Inode - locks an inode for exclusive file access
+if (functionNumber == 4) then
+    alias inodeNumber R2; 
+    alias currentPID R3;
+
+    // wait if inode is already locked by another process
+    while ([FILE_STATUS_TABLE + inodeNumber*4 + 0] != -1) do
+        [PROCESS_TABLE + (currentPID*16) + 4] = WAIT_FILE;    // set state to WAIT_FILE
+        [PROCESS_TABLE + (currentPID*16) + 5] = inodeNumber;   // store which inode we're waiting on
+        multipush(R1, R2, R3);
+        call SCHEDULER;   // yield CPU until inode is free
+        multipop(R1, R2, R3);
+    endwhile;
+
+    // check if file was deleted while we were waiting
+    if ([INODE_TABLE + inodeNumber*16 + 1] == -1) then 
+        R0 = -1;   // file no longer exists
+    else
+        [FILE_STATUS_TABLE + inodeNumber*4 + 0] = currentPID;   // lock inode
+        R0 = 0;   // success
+    endif;
+endif;
+
+//Release Inode - unlocks inode and wakes up waiting processes
+if (functionNumber == 5) then
+    alias inodeNumber R2;
+    alias currentPID R3;
+
+    if ([FILE_STATUS_TABLE + inodeNumber*4 + 0] == currentPID) then
+        [FILE_STATUS_TABLE + inodeNumber*4 + 0] = -1;   // unlock inode
+        alias counter R4;
+        counter = 0;
+        // wake up all processes waiting on this inode
+        while (counter < MAX_PROC_NUM) do
+            if ([PROCESS_TABLE + (counter*16) + 4] == WAIT_FILE && [PROCESS_TABLE + (counter*16) + 5] == inodeNumber) then
+                [PROCESS_TABLE + (counter*16) + 4] = READY;   // move to READY state
+            endif;
+            counter = counter + 1;
+        endwhile;
+        R0 = 0;   // success
+    else
+        R0 = -1;   // error: process doesn't own this inode
+    endif;
+endif;
+
+//Acquire Semaphore - allocates a free semaphore entry to the process
+if (functionNumber == 6) then
+    alias counter R3;
+    counter = 0;
+    // find a free semaphore slot (process count == 0)
+    while (counter < MAX_SEM_COUNT && [SEMAPHORE_TABLE + counter*4 + 1] != 0) do
+        counter = counter+1;
+    endwhile;
+
+    if (counter == MAX_SEM_COUNT) then
+        R0 = -1;   // no free semaphore available
+    else
+        [SEMAPHORE_TABLE + counter*4 + 0] = -1;   // no process holding it yet (unlocked)
+        [SEMAPHORE_TABLE + counter*4 + 1] = 1;    // set process count to 1
+        R0 = counter;   // return semaphore index
+    endif;
+endif;
+
+
+//Release Semaphore - frees semaphore and wakes up waiting processes
+if (functionNumber == 7) then
+    alias semIndex R2;
+    alias currentPID R3;
+
+    if ([SEMAPHORE_TABLE + semIndex*4 + 0] == currentPID) then
+        [SEMAPHORE_TABLE + semIndex*4 + 0] = -1;   // unlock semaphore (no holder)
+        alias counter R4;
+        counter = 0;
+        // wake up all processes waiting on this semaphore
+        while (counter < MAX_PROC_NUM) do
+            if ([PROCESS_TABLE + (counter*16) + 4] == WAIT_SEMAPHORE && [PROCESS_TABLE + (counter*16) + 5] == semIndex) then
+                [PROCESS_TABLE + (counter*16) + 4] = READY;   // move to READY state
+            endif;
+            counter = counter + 1;
+        endwhile;
+        [SEMAPHORE_TABLE + semIndex*4 + 1] = [SEMAPHORE_TABLE + semIndex*4 + 1] - 1;   // decrement process count
+    endif;
+endif;
+
+//Acquire Terminal - locks terminal for exclusive write access
+if (functionNumber == 8) then
+    // wait if terminal is busy (status == 1)
+    while ([TERMINAL_STATUS_TABLE+0] == 1) do
+        [PROCESS_TABLE + (currentPID*16) + 4] = WAIT_TERMINAL;   // set state to WAIT_TERMINAL
+        multipush(R1, R2, R3);
+        call SCHEDULER;   // yield CPU until terminal is free
+        multipop(R1, R2, R3);    
+    endwhile;
+    [TERMINAL_STATUS_TABLE+1] = currentPID;   // record owning process
+    [TERMINAL_STATUS_TABLE+0] = 1;            // mark terminal as busy
+endif;
+
+//Release Terminal - frees terminal and wakes up waiting processes
+if (functionNumber == 9) then
+    if ([TERMINAL_STATUS_TABLE+1] == currentPID) then
+        [TERMINAL_STATUS_TABLE+0] = 0;   // mark terminal as free
+        alias i R4;
+        i = 1;
+        // wake up all processes waiting for terminal
+        while (i < MAX_PROC_NUM) do
+            if ([PROCESS_TABLE + (i*16) + 4] == WAIT_TERMINAL) then
+                [PROCESS_TABLE + (i*16) + 4] = READY;   // move to READY state
+            endif;
+            i = i + 1;
+        endwhile;
+        R0 = 0;   // success
+    else
+        R0 = -1;   // error: process doesn't own terminal
+    endif;
+endif;
+
+breakpoint;
+return;
