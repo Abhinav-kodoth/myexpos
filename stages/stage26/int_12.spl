@@ -1,0 +1,42 @@
+//logout
+
+[PROCESS_TABLE + [SYSTEM_STATUS_TABLE + 1] * 16 + 9] = 28;
+[PROCESS_TABLE + [SYSTEM_STATUS_TABLE + 1] * 16 + 13] = SP;
+alias userSP R0;
+userSP = SP;
+
+SP = [PROCESS_TABLE + ([SYSTEM_STATUS_TABLE + 1] * 16) + 11] * 512 - 1;
+
+alias returnAddress R1;
+
+returnAddress = [PTBR + 2 * ((userSP - 1) / 512)] * 512 + (userSP - 1) % 512;
+
+// Check if the current process is the SHELL process (PID = 2); only SHELL is allowed to invoke Logout
+if ([SYSTEM_STATUS_TABLE + 1] != 2) then 
+    [returnAddress] = -1;
+else
+    multipush(R0, R1); 
+
+    // Set function code 5 (Free User Area Page) to release the user area page of the SHELL process
+    R1 = 5;
+    R2 = [SYSTEM_STATUS_TABLE + 1];
+    //current process
+    call PROCESS_MANAGER;
+    multipop(R0, R1);
+
+    [PROCESS_TABLE + 32 + 4] = TERMINATED;
+    [[PTBR + 16] * 512] = [[PTBR + 8] * 512 + 1]; 
+
+    // Set the state of the LOGIN process (PID 1) to READY so it can run again for the next login
+    [PROCESS_TABLE + 16 + 4] = READY;
+    [PROCESS_TABLE + 32 + 13] = 8 * 512;
+    [SYSTEM_STATUS_TABLE] = 0;
+
+    multipush(R0, R1);
+    call SCHEDULER;
+    multipop(R0, R1);
+endif;
+
+SP = userSP;
+[PROCESS_TABLE + [SYSTEM_STATUS_TABLE + 1] * 16 + 9] = 0;
+ireturn;

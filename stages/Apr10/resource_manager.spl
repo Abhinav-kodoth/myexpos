@@ -1,0 +1,187 @@
+//MOD 0 - Resource Manager
+
+alias functionNum R1;
+alias currentPID R2;
+
+// Acquire Disk
+if(functionNum == 3) then
+	[SYSTEM_STATUS_TABLE + 7] = [SYSTEM_STATUS_TABLE + 7] + 1;
+	while([DISK_STATUS_TABLE + 0] == 1) do
+		[PROCESS_TABLE + currentPID*16 + 4] = WAIT_DISK;
+		multipush(R1, R2);
+		call MOD_5;
+		multipop(R1, R2);
+	endwhile;
+	[DISK_STATUS_TABLE + 0] = 1;
+	[DISK_STATUS_TABLE + 4] = currentPID;
+endif;
+
+
+
+// Acquire Terminal 
+if(functionNum == 8) then
+	while([TERMINAL_STATUS_TABLE+0] == 1) do
+		[PROCESS_TABLE + currentPID*16 + 4] = WAIT_TERMINAL;
+		multipush(R1, R2);
+		call MOD_5;
+		multipop(R1, R2);
+	endwhile;
+	
+	[TERMINAL_STATUS_TABLE + 0] = 1;
+	[TERMINAL_STATUS_TABLE + 1] = currentPID;
+	breakpoint;
+	return;
+endif;
+
+//Acquire Inode (functionNum == 4)
+// Arguments: inodeIndex (R2), currPID (R3)
+if(functionNum == 4) then
+    alias inodeIndex R2;
+    alias currPID R3;
+    alias procTab R4;
+    procTab = PROCESS_TABLE + currPID*16;
+
+    // Busy wait loop - wait until the inode (file) is free
+    // FILE_STATUS_TABLE + 4*inodeIndex holds the LOCKING PID
+    // If it is not -1, some other process has locked this file
+    while([FILE_STATUS_TABLE + 4*inodeIndex] != -1) do
+        // Set the state of the current process to WAIT_FILE
+        // and store the inode index it is waiting for in the STATUS field
+        [procTab + 4] = WAIT_FILE;
+        [procTab + 5] = inodeIndex;
+        // Save registers and call scheduler - give CPU to another process
+        multipush(R1, R2, R3, R4);
+        call MOD_5;
+        // When woken up (inode released by another process), restore registers
+        // and check the while condition again - another process may have grabbed it
+        multipop(R1, R2, R3, R4);
+    endwhile;
+
+    // After acquiring the lock, check if the file still exists
+    // Another process may have DELETED the file while we were waiting
+    // A deleted inode entry has filename field (offset 1) set to -1
+    if([INODE_TABLE + inodeIndex*16 + 1] == -1) then
+        // File was deleted while we were waiting - return -1 to indicate failure
+        R0 = -1;
+        return;
+    endif;
+
+    // File exists and is now free - lock it by setting LOCKING PID
+    // in the File Status Table to the current process PID
+    [FILE_STATUS_TABLE + 4*inodeIndex] = currPID;
+
+    // Return 0 indicating success
+    R0 = 0;
+    return;
+endif;
+
+// Release Inode (functionNum == 5)
+// Arguments: inodeIndex (R2), currPID (R3)
+if(functionNum == 5) then
+    alias inodeIndex R2;
+    alias currPID R3;
+
+    // Verify that the calling process actually owns the lock
+    // If the LOCKING PID in File Status Table does not match currPID,
+    // this process does not hold the lock - return -1 (error)
+    if(currPID != [FILE_STATUS_TABLE + 4*inodeIndex]) then
+        R0 = -1;
+        return;
+    endif;
+
+    // Release the lock by invalidating the LOCKING PID field
+    // Setting it to -1 means no process currently holds the lock
+    [FILE_STATUS_TABLE + 4*inodeIndex] = -1;
+
+    // Wake up all processes waiting for this inode
+    // Scan all process table entries (PID 1 to 15)
+    alias i R4;
+    i = 1;
+    alias procTab R5;
+    while(i<16) do
+        procTab = PROCESS_TABLE + 16*i;
+        // Check if this process is waiting for the same inode index
+        if([procTab + 4] == WAIT_FILE && [procTab + 5] == inodeIndex) then
+            // Wake up the process by setting its state to READY
+            [procTab + 4] = READY;
+            // Clear the STATUS field (no longer waiting for any inode)
+            [procTab + 5] = -1;
+        endif;
+        i = i + 1;
+    endwhile;
+
+    // Return 0 indicating success
+    R0 = 0;
+    return;
+endif;
+
+
+//Acquire Semaphore
+if(functionNum == 6) then
+	alias i R3;
+	i = 0;
+	while([SEMAPHORE_TABLE + 4*i + 1] != 0) do
+		i = i + 1;
+	endwhile;
+	if(i==32) then
+		R0 = -1;
+		return;
+	endif;
+	[SEMAPHORE_TABLE + 4*i + 1] = 1;
+	[SEMAPHORE_TABLE + 4*i] = -1;
+	R0 = i;
+	return;
+endif;
+
+//Release Semaphore
+if(functionNum == 7) then
+	if([SEMAPHORE_TABLE + 4*R2] == R3) then
+		[SEMAPHORE_TABLE + 4*R2] = -1;
+		alias i R4;
+		i=1;
+		while(i<16) do
+			alias procTab R5;
+			procTab = PROCESS_TABLE + 16*i;
+			if([procTab + 4] == WAIT_SEMAPHORE && [procTab + 5] == R2) then
+				[procTab + 4] = READY;
+				[procTab + 5] = -1;
+			endif;
+			i = i + 1;
+		endwhile;
+	endif;
+	[SEMAPHORE_TABLE + 4*R2 + 1] = [SEMAPHORE_TABLE + 4*R2 + 1] -1;
+	R0 = 0;
+	return;
+endif;
+
+// Release Terminal
+if(functionNum == 9) then
+	if(currentPID != [TERMINAL_STATUS_TABLE + 1]) then
+		alias retVal R0;
+		retVal = -1;
+		return;
+
+	else
+		[TERMINAL_STATUS_TABLE + 0] = 0;
+		alias i R3;
+		i = 0;
+		while(i<16) do
+			alias pid R4;
+			pid = [PROCESS_TABLE + 16*i + 1];
+			if( pid>0 && pid<16) then
+				if([PROCESS_TABLE + 16*i + 4] == WAIT_TERMINAL) then
+					[PROCESS_TABLE + 16*i + 4] = READY;
+				endif;
+			endif;
+			i = i + 1;
+		endwhile;
+		alias retVal R0;
+		retVal = 0;
+		breakpoint;
+		return;
+	endif;
+else
+alias retVal R0;
+retVal = -1;
+return;
+endif;

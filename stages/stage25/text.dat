@@ -1,0 +1,16 @@
+Exception handler (INT 0)
+Timer Interrupt (INT 1)
+Disk Interrupt (INT 2)
+Console Interrupt (INT 3)
+INT 4 (Create, Delete)
+INT 5 (Seek, Open, Close)
+6-read
+7-write
+8-fork
+9-Exec
+10-exit
+INT 11 (Getpid, Getppid, Wait, Signal)
+INT 12 (Logout)
+INT 13 (Semget, Semrelease)
+INT 14 (SemLock, SemUnLock)
+15-Shutdown
