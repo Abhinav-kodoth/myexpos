@@ -1,5 +1,4 @@
 load --os /home/abhinav/myexpos/stages/stage26/os_startup.xsm
-load --init /home/abhinav/myexpos/stages/stage26/shell.xsm
 load --idle $HOME/myexpos/stages/stage_14/idle.xsm
 load --int=timer $HOME/myexpos/stages/stage_14/timer.xsm
 load --int=6 $HOME/myexpos/stages/stage_24/int6.xsm
@@ -27,6 +26,7 @@ load --module 4 $HOME/myexpos/stages/stage_23/device_manager.xsm
 load --module 5 $HOME/myexpos/stages/stage_20/scheduler.xsm
 load --module 7 /home/abhinav/myexpos/stages/stage26/boot_module.xsm
 load --library $HOME/myexpos/expl/library.lib
-load --exec /home/abhinav/myexpos/stages/stage26/login.xsm
+load --init /home/abhinav/myexpos/stages/stage26/login.xsm
+load --exec /home/abhinav/myexpos/stages/stage26/shell.xsm
 load --exec /home/abhinav/myexpos/stages/stage26/lu.xsm
 load --exec /home/abhinav/myexpos/stages/stage26/ru.xsm
